@@ -96,7 +96,15 @@ const {
   createCaAwareFetch,
   startPollLoop,
   validateRegistrationResponse,
+  readClaimLogStream,
 } = require("./protocol");
+const {
+  createJobLogSession,
+  withJobConsole,
+  mirrorToJobConsole,
+  closeInBackground,
+  drainJobLogSessions,
+} = require("./job-log-stream");
 const {
   buildPolicyRejectionEvidence,
   buildEvidenceItem,
@@ -238,6 +246,7 @@ function buildSignedJobPolicyDescriptor(job) {
 }
 
 function emitLog(log, message, details) {
+  mirrorToJobConsole("error", message, details);
   if (typeof log === "function") {
     log(message, details);
     return;
@@ -258,6 +267,7 @@ function emitLog(log, message, details) {
  */
 function emitInfo(message, details) {
   defaultAgentLogger.info(message, details);
+  mirrorToJobConsole("info", message, details);
 }
 
 function localAttemptId(jobId) {
@@ -347,13 +357,14 @@ const AGENT_CANDIDATE_CAPABILITIES = Object.freeze(
   isWindows()
     ? [
         "evidence-claim-binding-v1",
+        "job-log-stream-v1",
         "windows-cert-store-v1",
         "iis-binding-v1",
         "trust-anchor-deploy-v1",
       ]
     : AGENT_TRUST_STORE_PREREQUISITES.candidate
-      ? ["evidence-claim-binding-v1", "trust-anchor-deploy-v1"]
-      : ["evidence-claim-binding-v1"],
+      ? ["evidence-claim-binding-v1", "job-log-stream-v1", "trust-anchor-deploy-v1"]
+      : ["evidence-claim-binding-v1", "job-log-stream-v1"],
 );
 
 /**
@@ -370,6 +381,12 @@ const AGENT_DECLARED_CAPABILITIES = filterQualifiedCapabilities(
   AGENT_CANDIDATE_CAPABILITIES,
 );
 
+const JOB_LOG_STREAM_CAPABILITY = "job-log-stream-v1";
+
+function agentLogStreamEnabled(env = process.env) {
+  return env.TT_AGENT_LOG_STREAM !== "off";
+}
+
 /**
  * ADR-0012 decision 3, step 4: agent-id-binding-v1 is advertised only from
  * the effective runtime value of requireSignedAgentId (already resolved
@@ -380,11 +397,20 @@ const AGENT_DECLARED_CAPABILITIES = filterQualifiedCapabilities(
  * effective value is false, absence of agentId is still tolerated by the
  * compatibility decoder (see checkAgentIdBinding), so advertising then
  * would overclaim.
+ *
+ * job-log-stream-v1 follows the same rule for TT_AGENT_LOG_STREAM=off: the
+ * agent must not advertise a stream it will refuse to open, or the control
+ * plane opens a pending stream that later looks abandoned.
  */
-function resolveDeclaredCapabilities(requireSignedAgentId) {
+function resolveDeclaredCapabilities(requireSignedAgentId, env = process.env) {
+  const base = agentLogStreamEnabled(env)
+    ? AGENT_DECLARED_CAPABILITIES
+    : AGENT_DECLARED_CAPABILITIES.filter(
+      (capability) => capability !== JOB_LOG_STREAM_CAPABILITY,
+    );
   return requireSignedAgentId
-    ? Object.freeze([...AGENT_DECLARED_CAPABILITIES, AGENT_ID_BINDING_CAPABILITY])
-    : AGENT_DECLARED_CAPABILITIES;
+    ? Object.freeze([...base, AGENT_ID_BINDING_CAPABILITY])
+    : Object.freeze([...base]);
 }
 
 /**
@@ -1964,116 +1990,137 @@ async function handleSignedJob({
   // success as "failed". Periodic lease heartbeat covers long ACME/DNS
   // stages that can approach the 15-minute lease TTL without stage-boundary
   // renews.
-  emitInfo(
-    `job ${jobId}: passed signature/replay/clock/policy verification, starting execution ` +
-      `(action=${job?.action || "unknown"}, mode=${resolveJobMode(job)})`,
-  );
-  const evidenceBuffer = createEvidenceBuffer();
-  const leaseOpts = {
-    leaseClient: client,
-    jobId,
-    claimId,
-    log,
-    leaseState,
-  };
-  const leaseHeartbeat = startPeriodicLeaseRenewal(leaseOpts);
-  let outcome;
+  const logOffer = readClaimLogStream(claimedJob);
+  const jobLogSession = logOffer?.enabled === true && agentLogStreamEnabled()
+    ? createJobLogSession({
+      post: (request) => client.postJobLogs(request),
+      jobId,
+      claimId,
+      maxBatchBytes: logOffer.maxBatchBytes,
+    })
+    : null;
+  // One try/finally so evidence-assert / transmit throws still send final:true
+  // and clear the session from the claims map.
   try {
-    outcome = await executeJob({
-      job,
-      jobId,
-      attemptId,
-      claimId,
-      policyEngine,
-      client: evidenceBuffer,
+    withJobConsole(jobLogSession, () => emitInfo(
+      `job ${jobId}: passed signature/replay/clock/policy verification, starting execution ` +
+        `(action=${job?.action || "unknown"}, mode=${resolveJobMode(job)})`,
+    ));
+    const evidenceBuffer = createEvidenceBuffer();
+    const leaseOpts = {
       leaseClient: client,
-      leaseState,
-      executionContext,
-      log,
-    });
-    const heartbeatAbort = leaseHeartbeat.getAbort();
-    // Lease loss after a "clean" terminal must not be reported as success.
-    // awaiting_issuer is intentionally omitted: the CA request and RequestId
-    // journal already exist, so that status stays more accurate than orphaned.
-    if (
-      heartbeatAbort &&
-      outcome &&
-      (outcome.status === "succeeded" || outcome.status === "dry_run_complete")
-    ) {
-      outcome = heartbeatAbort;
-    }
-  } catch (err) {
-    emitLog(log, `job ${jobId} execution error: ${err.message}`, {
-      name: err?.name,
-      code: err?.code,
-    });
-    outcome = {
-      status: "failed",
-      errorMessage: boundErrorMessage(`job execution failed: ${err.message}`),
-    };
-  } finally {
-    stopPeriodicLeaseRenewal(leaseHeartbeat);
-  }
-  const finishDetails =
-    outcome?.status === "failed"
-      ? {
-          errorMessage: outcome?.errorMessage,
-          failureCategory: outcome?.trustResult?.failureCategory,
-        }
-      : undefined;
-  emitInfo(`job ${jobId}: execution finished with status ${outcome?.status || "unknown"}`, finishDetails);
-
-  const evidenceBodies = evidenceBuffer.takeEvidence();
-  for (const body of evidenceBodies) {
-    assertEvidencePayloadSafe(body);
-  }
-
-  const transmitted = await persistAndTransmitOutcome({
-    outboxDir: resolvedOutboxDir,
-    client,
-    result: {
       jobId,
-      attemptId,
       claimId,
-      nonce,
-      status: outcome.status,
-      rejectionReason: outcome.rejectionReason ?? null,
-      keyRotated: outcome.keyRotated ?? null,
-      errorMessage: outcome.errorMessage ?? null,
-      clockOffsetMs: clockEstimator.getOffsetMs(),
-      // Only trust-anchor jobs produce this; omitted (not null) for every
-      // other job family so their result bodies stay byte-identical.
-      ...(outcome.trustResult ? { trustResult: outcome.trustResult } : {}),
-      // ADR-0014: awaiting_issuer (and other AD CS outcomes) carry enrollment
-      // state; required by agent-protocol when status is awaiting_issuer.
-      ...(outcome.enrollmentResult
-        ? { enrollmentResult: outcome.enrollmentResult }
-        : {}),
-    },
-    evidence: evidenceBodies,
-    log,
-  });
-
-  if (stateDir && outcome && typeof outcome.status === "string") {
+      log,
+      leaseState,
+    };
+    const leaseHeartbeat = startPeriodicLeaseRenewal(leaseOpts);
+    let outcome;
     try {
-      clearJournalOnTerminal({
-        stateDir,
+      outcome = await withJobConsole(jobLogSession, () => executeJob({
+        job,
         jobId,
         attemptId,
-        status: outcome.status,
-      });
-    } catch (err) {
-      emitLog(
+        claimId,
+        policyEngine,
+        client: evidenceBuffer,
+        leaseClient: client,
+        leaseState,
+        executionContext,
         log,
-        `could not clear job journal for ${jobId}: ${err.message}`,
-      );
+        jobLog: jobLogSession?.logger,
+      }));
+      const heartbeatAbort = leaseHeartbeat.getAbort();
+      // Lease loss after a "clean" terminal must not be reported as success.
+      // awaiting_issuer is intentionally omitted: the CA request and RequestId
+      // journal already exist, so that status stays more accurate than orphaned.
+      if (
+        heartbeatAbort &&
+        outcome &&
+        (outcome.status === "succeeded" || outcome.status === "dry_run_complete")
+      ) {
+        outcome = heartbeatAbort;
+      }
+    } catch (err) {
+      emitLog(log, `job ${jobId} execution error: ${err.message}`, {
+        name: err?.name,
+        code: err?.code,
+      });
+      outcome = {
+        status: "failed",
+        errorMessage: boundErrorMessage(`job execution failed: ${err.message}`),
+      };
+    } finally {
+      stopPeriodicLeaseRenewal(leaseHeartbeat);
     }
-  }
+    const finishDetails =
+      outcome?.status === "failed"
+        ? {
+            errorMessage: outcome?.errorMessage,
+            failureCategory: outcome?.trustResult?.failureCategory,
+          }
+        : undefined;
+    withJobConsole(jobLogSession, () => emitInfo(
+      `job ${jobId}: execution finished with status ${outcome?.status || "unknown"}`,
+      finishDetails,
+    ));
 
-  return {
-    ...transmitted,
-    retired: outcome.retired === true,
-  };
+    const evidenceBodies = evidenceBuffer.takeEvidence();
+    for (const body of evidenceBodies) {
+      assertEvidencePayloadSafe(body);
+    }
+
+    const transmitted = await persistAndTransmitOutcome({
+      outboxDir: resolvedOutboxDir,
+      client,
+      result: {
+        jobId,
+        attemptId,
+        claimId,
+        nonce,
+        status: outcome.status,
+        rejectionReason: outcome.rejectionReason ?? null,
+        keyRotated: outcome.keyRotated ?? null,
+        errorMessage: outcome.errorMessage ?? null,
+        clockOffsetMs: clockEstimator.getOffsetMs(),
+        // Only trust-anchor jobs produce this; omitted (not null) for every
+        // other job family so their result bodies stay byte-identical.
+        ...(outcome.trustResult ? { trustResult: outcome.trustResult } : {}),
+        // ADR-0014: awaiting_issuer (and other AD CS outcomes) carry enrollment
+        // state; required by agent-protocol when status is awaiting_issuer.
+        ...(outcome.enrollmentResult
+          ? { enrollmentResult: outcome.enrollmentResult }
+          : {}),
+      },
+      evidence: evidenceBodies,
+      log,
+    });
+
+    if (stateDir && outcome && typeof outcome.status === "string") {
+      try {
+        clearJournalOnTerminal({
+          stateDir,
+          jobId,
+          attemptId,
+          status: outcome.status,
+        });
+      } catch (err) {
+        emitLog(
+          log,
+          `could not clear job journal for ${jobId}: ${err.message}`,
+        );
+      }
+    }
+
+    return {
+      ...transmitted,
+      retired: outcome.retired === true,
+    };
+  } finally {
+    // Not awaited: a slow or unreachable log endpoint must not hold the
+    // claim loop. runAgent drains briefly on shutdown.
+    closeInBackground(jobLogSession);
+  }
 }
 
 /**
@@ -2185,6 +2232,14 @@ async function handleObserveOnlyJob({
  *   into ../trust-store. Always null/omitted in production.
  * @returns {Promise<{ status: string, rejectionReason?: string|null, keyRotated?: boolean|null, errorMessage?: string|null }>}
  */
+function stepForAction(action) {
+  if (action === "renew") return "acme";
+  if (action === "deploy") return "deploy";
+  if (action === "reload") return "reload";
+  if (action === "distribute-trust" || action === "revoke-trust") return "trust";
+  return "other";
+}
+
 async function executeJob({
   job,
   jobId,
@@ -2197,6 +2252,7 @@ async function executeJob({
   executionContext,
   log = console.error,
   trustStoreSeams = null,
+  jobLog = null,
 }) {
   const { execution } = executionContext;
   const action = job.action;
@@ -2220,6 +2276,11 @@ async function executeJob({
   // bindEvidenceClientToClaim above for why this is done once, here, rather
   // than threading claimId through every downstream execute*Job helper).
   const claimBoundClient = bindEvidenceClientToClaim(client, claimId);
+
+  if (jobLog) {
+    jobLog.step(stepForAction(action));
+    jobLog.info(`Starting ${action || "job"}`);
+  }
 
   if (action === "noop") {
     await reportStepEvidence(claimBoundClient, jobId, [
@@ -6378,6 +6439,7 @@ async function runAgent(_argv, { signal: externalSignal } = {}) {
     process.removeListener("SIGINT", stop);
     process.removeListener("SIGTERM", stop);
     if (externalSignal) externalSignal.removeEventListener("abort", stop);
+    await drainJobLogSessions();
   }
 }
 
