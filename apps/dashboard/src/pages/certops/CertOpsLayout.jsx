@@ -25,7 +25,7 @@ const CERTOPS_TABS = [
  *
  * These are real navigations, so they stay native links with
  * `aria-current='page'` rather than claiming tablist/tab roles the markup does
- * not implement. Five labels do not fit a phone width, so the row scrolls
+ * not implement. The labels do not fit a phone width, so the row scrolls
  * horizontally with a fade at the trailing edge to show there is more; letting
  * it wrap into two rows reads as broken, and hiding labels behind a second
  * control would duplicate the navigation for assistive technology.

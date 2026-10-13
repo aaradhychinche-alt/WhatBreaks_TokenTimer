@@ -2,9 +2,9 @@
 
 Last reviewed: 2026-10-13. Dropped the optional already-expired-import
 notification ask ([#231](https://github.com/tokentimerch/tokentimer-core/issues/231));
-quiet historical imports stay the default without a toggle. AD CS durable
-journal recovery remains in draft [#343](https://github.com/tokentimerch/tokentimer-core/pull/343)
-(gated; `adcs` still not executable).
+quiet historical imports stay the default without a toggle. The AD CS
+issuer is implemented on the Windows agent but disabled in released builds
+until its capability is qualified.
 
 This page is the repository milestone index: what Core takes next, what must
 land before v1.0.0 so that release is a stable product, what ships in 0.x
@@ -76,11 +76,14 @@ called stable while it is open.
   inert executor wiring ([#339](https://github.com/tokentimerch/tokentimer-core/pull/339)),
   and issued-certificate validation before accept
   ([#342](https://github.com/tokentimerch/tokentimer-core/pull/342)) are on `main`.
-  Durable enrollment journal recovery is implemented on the agent in draft
-  [#343](https://github.com/tokentimerch/tokentimer-core/pull/343) and stays
-  inert. `adcs` remains out of the executable issuer kinds until
-  control-plane enrollment records and continuation scheduling land, and
-  the ADR-0014 release gate passes on real hosts.
+  Durable enrollment journal recovery
+  ([#343](https://github.com/tokentimerch/tokentimer-core/pull/343)) and
+  control-plane enrollment records, continuation scheduling, and issuer
+  preflight ([#345](https://github.com/tokentimerch/tokentimer-core/pull/345))
+  are on `main`. `adcs` stays disabled in released agent builds until the
+  `adcs-enroll-v1` capability is qualified on real Windows hosts. Where it
+  is enabled, the agent contacts a CA only when a local enrollment rule
+  names that CA and template.
 
 ---
 

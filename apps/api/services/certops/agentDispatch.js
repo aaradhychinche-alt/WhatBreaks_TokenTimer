@@ -75,6 +75,7 @@ const {
   computeAgentCompatibility,
 } = require("./agentRegistry");
 const {
+  ADCS_ENROLL_CAPABILITY,
   EVIDENCE_CLAIM_BINDING_CAPABILITY,
   TRUST_ANCHOR_DEPLOY_CAPABILITY,
   evaluateAgentJobEligibility,
@@ -162,7 +163,7 @@ const RESULT_STATUS_TO_JOB_STATUS = Object.freeze({
  * Takes the *whole* job payload, not payload.target directly, and
  * normalizes it the same defensive way the claim path already does
  * (job.payload is jsonb and normally arrives pre-parsed, but is read here
- * defensively in case it ever arrives as a raw JSON string) — calling
+ * defensively in case it ever arrives as a raw JSON string); calling
  * safeParseJson on an already-parsed object would silently discard it, since
  * safeParseJson only ever parses strings. Returns `{ targetType: null }` for
  * a missing or malformed target rather than throwing, since every call site
@@ -1101,6 +1102,12 @@ async function claimJobs({
       capability: TRUST_ANCHOR_DEPLOY_CAPABILITY,
       env,
     });
+    const canEnrollAdcs = hasFreshCapability({
+      declaredCapabilities: caps.declared_capabilities,
+      capabilitiesUpdatedAt: caps.capabilities_updated_at,
+      capability: ADCS_ENROLL_CAPABILITY,
+      env,
+    });
     const useV2Envelope = hasFreshCapability({
       declaredCapabilities: caps.declared_capabilities,
       capabilitiesUpdatedAt: caps.capabilities_updated_at,
@@ -1139,7 +1146,7 @@ async function claimJobs({
               approved_payload_hash, approved_canonical_intent_hash,
               mode, executor_kind,
               assigned_agent_id, required_target_selector,
-              required_dns_provider, required_command_profile,
+              required_dns_provider, required_command_profile, enrollment_id,
               EXISTS (
                 SELECT 1
                   FROM managed_certificates mc
@@ -1233,6 +1240,9 @@ async function claimJobs({
             operation NOT IN ('distribute-trust', 'revoke-trust')
             OR $10::boolean
           )
+          -- AD CS enrollment and continuation jobs (enrollment_id set) need a
+          -- fresh adcs-enroll-v1 declaration; prefilter only, as above.
+          AND (enrollment_id IS NULL OR $11::boolean)
         ORDER BY created_at
         LIMIT $7
         FOR UPDATE SKIP LOCKED`,
@@ -1247,6 +1257,7 @@ async function claimJobs({
         canBindEvidenceToClaim,
         agentKind,
         canBindTrustAnchorDeploy,
+        canEnrollAdcs,
       ],
     );
 
@@ -1285,6 +1296,7 @@ async function claimJobs({
           requiredDnsProvider: row.required_dns_provider,
           requiredCommandProfile: row.required_command_profile,
           subjectIsProvisioning: row.subject_is_provisioning === true,
+          issuerKind: row.enrollment_id ? "adcs" : null,
         },
         compatibility,
         env,
@@ -2415,7 +2427,7 @@ async function ingestResult({
           ).slice(0, 1024)
         : null;
 
-    // Only ever SET needs_operator_reconciliation to true here — never clear
+    // Only ever SET needs_operator_reconciliation to true here, never clear
     // an existing true from fencing (clearing is an explicit operator action).
     let setNeedsReconciliation = false;
     let reconciliationReason = null;
@@ -2445,6 +2457,21 @@ async function ingestResult({
         : {}),
       ...(body.keyRotated != null ? { keyRotated: body.keyRotated } : {}),
       ...(enrollmentResult ? { enrollmentResult } : {}),
+      ...(body?.preflightResult && job.operation === "adcs-preflight"
+        ? {
+            preflightVerdict: {
+              templateCheck: body.preflightResult.templateCheck?.verdict ?? null,
+              caCheck: body.preflightResult.caCheck?.verdict ?? null,
+              // What the agent checked. Readiness compares it with the
+              // confirmed issuer version, so older evidence stops qualifying.
+              caConfig: body.preflightResult.caConfig ?? null,
+              template: body.preflightResult.template ?? null,
+              caKeySha256s: (body.preflightResult.caCertificates ?? []).map(
+                (ca) => ca.keySha256,
+              ),
+            },
+          }
+        : {}),
       ...(trustResult
         ? {
             outcome: trustResult.outcome ?? null,
@@ -2867,6 +2894,7 @@ module.exports = {
     safeParseJson,
     serviceError,
     wireActionForOperation,
+    ADCS_ENROLL_CAPABILITY,
     EVIDENCE_CLAIM_BINDING_CAPABILITY,
     TRUST_ANCHOR_DEPLOY_CAPABILITY,
     SIGNED_PAYLOAD_B64_CAPABILITY,

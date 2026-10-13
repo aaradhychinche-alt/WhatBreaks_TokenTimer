@@ -4753,6 +4753,40 @@ const migrations = [
         WHERE next_poll_at IS NOT NULL;
     `,
   },
+  {
+    version: 71,
+    name: "certops_adcs_evidence_types",
+    sql: `
+      ALTER TABLE certificate_evidence
+        DROP CONSTRAINT IF EXISTS certificate_evidence_evidence_type_check;
+      ALTER TABLE certificate_evidence
+        ADD CONSTRAINT certificate_evidence_evidence_type_check CHECK (
+          evidence_type IN (
+            'certificate.observed', 'deployment.checked', 'deployment.updated',
+            'validation.passed', 'validation.failed', 'policy.checked',
+            'trust.distributed', 'trust.revoked',
+            'adcs-template-verdict', 'adcs-submitted', 'adcs-pending',
+            'adcs-issued', 'adcs-denied', 'adcs-uncertain',
+            'adcs-validation-deferred', 'adcs-rejected-invalid'
+          )
+        );
+    `,
+  },
+  {
+    version: 72,
+    name: "certops_profile_issuer",
+    sql: `
+      ALTER TABLE certificate_profiles
+        ADD COLUMN IF NOT EXISTS issuer_id UUID NULL;
+      ALTER TABLE certificate_profiles
+        DROP CONSTRAINT IF EXISTS fk_certificate_profiles_issuer;
+      ALTER TABLE certificate_profiles
+        ADD CONSTRAINT fk_certificate_profiles_issuer
+          FOREIGN KEY (workspace_id, issuer_id)
+          REFERENCES certificate_issuers(workspace_id, id)
+          ON DELETE SET NULL (issuer_id);
+    `,
+  },
 ];
 
 // PR #72 briefly shipped this version/name sequence before PR #139 restored
