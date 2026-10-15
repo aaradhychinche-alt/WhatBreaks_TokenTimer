@@ -15,6 +15,7 @@ import { DashboardThemeProvider } from '../../src/hooks/useDashboardTheme.js';
 const {
   useCertOpsCertificatesMock,
   useCertOpsCanManageMock,
+  useCertOpsIsWorkspaceAdminMock,
   retireCertificateMock,
   setUpCertificateRenewalMock,
   detachCertificateRenewalProfileMock,
@@ -29,6 +30,7 @@ const {
 } = vi.hoisted(() => ({
   useCertOpsCertificatesMock: vi.fn(),
   useCertOpsCanManageMock: vi.fn(),
+  useCertOpsIsWorkspaceAdminMock: vi.fn(() => false),
   retireCertificateMock: vi.fn(),
   setUpCertificateRenewalMock: vi.fn(),
   detachCertificateRenewalProfileMock: vi.fn(),
@@ -47,8 +49,9 @@ vi.mock('../../src/utils/WorkspaceContext.jsx', () => ({
 }));
 
 vi.mock('../../src/components/certops/useCertOps.js', () => ({
-  useCertOpsCanManage: useCertOpsCanManageMock,
   useCertOpsEnabled: () => true,
+  useCertOpsCanManage: useCertOpsCanManageMock,
+  useCertOpsIsWorkspaceAdmin: useCertOpsIsWorkspaceAdminMock,
 }));
 
 vi.mock('../../src/components/certops/useCertOpsCertificates.js', () => ({
@@ -150,6 +153,7 @@ function certificate(overrides = {}) {
 }
 
 beforeEach(() => {
+  useCertOpsIsWorkspaceAdminMock.mockReturnValue(false);
   useCertOpsCertificatesMock.mockReset();
   useCertOpsCanManageMock.mockReset();
   retireCertificateMock.mockReset();
@@ -188,6 +192,27 @@ beforeEach(() => {
   getCertificateMock.mockResolvedValue({ certificate: null });
   listCertOpsRenewalProfilesMock.mockResolvedValue([]);
 });
+
+it.each([
+  ['vault:customer/group', true],
+  [null, false],
+])(
+  'offers Vault profile repair only with local publication authority (%s)',
+  (keyReference, expected) => {
+    useCertOpsIsWorkspaceAdminMock.mockReturnValue(true);
+    useCertOpsCertificatesMock.mockReturnValue(
+      certState({
+        certificates: [certificate({ keyMode: 'vault-managed', keyReference })],
+      })
+    );
+    renderPage();
+    const repair = screen.queryByRole('button', {
+      name: 'Repair renewal profile',
+    });
+    if (expected) expect(repair).toBeInTheDocument();
+    else expect(repair).not.toBeInTheDocument();
+  }
+);
 
 it('shows one stable identity lifecycle alongside independent inventory expiry', () => {
   const now = Date.now();

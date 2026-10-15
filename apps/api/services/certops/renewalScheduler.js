@@ -617,6 +617,9 @@ async function createRenewalJobForCertificate({
         certificate.not_after,
       ),
       payload,
+      ...(payload.publication ? { assignedAgentId: (await client.query(
+        "SELECT issuer_agent_id FROM certops_distribution_groups WHERE workspace_id=$1 AND id=$2 AND state='active'",
+        [certificate.workspace_id, payload.publication.groupId])).rows[0]?.issuer_agent_id } : {}),
       env,
       workspaceRequiresApprovalAlways:
         workspace.certops_require_approval_always === true,
@@ -894,6 +897,7 @@ async function loadCertificateRenewalRows({
   const profileColumns = `SELECT mc.id,
             mc.status,
             mc.key_mode,
+            mc.key_reference,
             mc.not_after,
             mc.common_name,
             mc.subject_alt_names,

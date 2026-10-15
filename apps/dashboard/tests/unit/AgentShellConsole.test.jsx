@@ -76,9 +76,9 @@ describe('AgentShellConsole', () => {
     expect(
       toneForLine({ status: 'info', msg: 'deploying certificate to /x' })
     ).toBe('info');
-    expect(
-      toneForLine({ status: 'info', msg: 'ACME order succeeded' })
-    ).toBe('success');
+    expect(toneForLine({ status: 'info', msg: 'ACME order succeeded' })).toBe(
+      'success'
+    );
     expect(
       toneForLine({ status: 'error', msg: 'deploy failed: permission denied' })
     ).toBe('danger');
@@ -270,5 +270,23 @@ describe('AgentShellConsole', () => {
         seq: 1,
       }).msg
     ).toBe('2026-10-06T08:43:53.000Z tokentimer-agent: Starting noop');
+  });
+
+  it('keeps repeated lines distinct when claim identifiers are redacted', () => {
+    const event = {
+      message: 'Starting noop',
+      ts: '2026-10-06T08:43:53.000Z',
+      attempt: 1,
+      seq: 1,
+    };
+    expect(formatConsoleLine(event).id).not.toBe(
+      formatConsoleLine({ ...event, seq: 2 }).id
+    );
+    expect(formatConsoleLine(event).id).not.toBe(
+      formatConsoleLine({ ...event, attempt: 2 }).id
+    );
+    expect(formatConsoleLine(event).id).toBe(
+      formatConsoleLine({ ...event }).id
+    );
   });
 });
