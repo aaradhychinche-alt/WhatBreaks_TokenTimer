@@ -9,38 +9,39 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-The coordinated candidate targets 0.18.0; existing 0.17.3 tags remain immutable.
+Target: **0.18.0**.
 
 ### Added
 
-- **Shared certificate distribution through customer Vault.** An assigned native issuer publishes one immutable certificate version for explicitly assigned Linux consumers. Ordinary, SAN and wildcard certificates use the same workflow. Private keys, Vault credentials and DNS credentials remain customer-local. Distribution management is API-first, with group/consumer status on Renewals. Distribution and AD CS agent capabilities remain gated pending independent real-host release qualification.
-
-- **CertOps agent output console.** Agents stream a curated, secret-filtered execution console for each job attempt, shown live on the job timeline, from the agent fleet, and in the Set up automatic renewal modal after that proving job is dispatched. Managers and admins see the lines; viewers see only whether output is running, complete, or incomplete. An abandoned log stream does not badge a succeeded job as failed. Shutdown can still post the final log batch after the run loop aborts. If a rotated key is installed but the agent custody copy cannot be updated, the job still succeeds, the staging key is kept, and the stale custody file is moved aside. If that move fails, a quarantine marker blocks later jobs from reusing the old custody filename; they use the kept staging key instead. If the marker cannot be written either, the old custody file is wiped in place. An unreadable marker fails closed. A later job reuses a custody key only when that key matches the deployed certificate, so a stale file left after a failed wipe is not selected. The console is best effort: a slow or failing log endpoint never delays or changes a job result. Database migration 69 adds the storage. See [agent output console settings](docs/CONFIGURATION.md#certops-maintenance-sweeps-worker).
-  - **Operator action:** upgrade the API, worker and agents in any order; agents stream only once both sides support it. Keep the `certops` worker scheduled: its new agent-log sweeps close streams for cancelled or requeued jobs and enforce retention.
-  - `CERTOPS_AGENT_LOG_RETENTION_DAYS` (default `30`) sets retention. `0` turns storage off and the next sweep deletes stored lines. `CERTOPS_AGENT_LOG_DAILY_BYTES` caps stored bytes per workspace per UTC day (`0`, the default, means no cap); a present but invalid value fails closed at API boot so the quota cannot silently become unlimited. `TT_AGENT_LOG_STREAM=off` stops one agent from sending. Compose forwards retention to `api` and `worker-certops` and the byte cap to `api`; Helm uses `config.certopsAgentLogRetentionDays` / `config.certopsAgentLogDailyBytes`.
+- **Shared certificate distribution through customer Vault.** Publish immutable certificate versions to assigned Linux consumers, including ordinary, SAN and wildcard certificates. Private keys and credentials remain customer-local. Management is API-first, with status on Renewals. Distribution and AD CS agent capabilities remain gated pending real-host qualification.
+- **Agent output console.** Managers and admins can follow secret-filtered job output; viewers see stream status only. Console failures do not change job results. **Operator action:** apply migration 69 and keep the `certops` worker scheduled for log cleanup. Configure retention and quotas with `CERTOPS_AGENT_LOG_RETENTION_DAYS` (default `30`; `0` disables storage) and `CERTOPS_AGENT_LOG_DAILY_BYTES` (default `0`, unlimited). `TT_AGENT_LOG_STREAM=off` disables streaming per agent. See [configuration](docs/CONFIGURATION.md#certops-maintenance-sweeps-worker).
 
 ### Changed
 
-- Revoked and decommissioned certificates remain visible when still observed, clearly labeled as retired. They stay out of the Active filter, active counters, and automatic renewal. Marking a certificate revoked while a job is in progress flags that job for review, even if it later reports success; decommissioning still rejects an active mutation. Lifecycle retirement records CertOps state; it does not revoke a certificate at its CA or remove installed copies.
-- The renewal schedule section is gone. Certificate rows show a CA capacity wait separately from the last renewal attempt, which is a job-status badge.
-- Renewal profiles list the issuer in its own column. Issuer and lead time both use an outline Change button, and profile details uses the same icon as the certificate inventory. AD CS issuers sit on the Renewals tab in the system settings card.
-- **AD CS enrollment on the Windows agent.** Jobs with issuer kind `adcs` enroll and renew IIS certificates from an enterprise CA. A succeeded preflight is stored on the issuer and lists the CA certificates an operator can confirm. The agent contacts a CA only when a local enrollment rule names that CA and template, and only when it has declared `adcs-enroll-v1`. Creating an issuer or profile does not issue a certificate by itself. **Operator guidance:** upgrade API and Windows agents together so a preflight verdict is saved, not only the job status.
-- An IIS renewal on Windows now fails with `UNSUPPORTED_BINDING_SETTINGS` and leaves the binding untouched when the binding has a setting the agent cannot carry over to the new certificate, such as one this host's `netsh` cannot set. The error detail names the setting. Earlier versions dropped such settings on renewal. **Operator guidance:** remove the named setting, or rebind that certificate manually.
+- **AD CS enrollment.** Where enabled, Windows agents enroll and renew IIS certificates only under explicit local CA, template, DNS and algorithm permissions. Unsafe configurations are refused. **Operator action:** upgrade API and agents together and configure `dnsScopes` and `keyAlgorithms` before enabling enrollment. `adcs.validationTimeoutSeconds` accepts 300–86400 seconds (default 24 hours); restarts cannot extend pending validation. Issuers without renewal capacity return `409 CERTOPS_RENEWAL_PER_CA_CAP_EXCEEDED`.
+- **Windows ACME requires fresh keys.** Explicit key reuse fails with `WINDOWS_ACME_KEY_REUSE_UNSUPPORTED`, including dry runs. **Operator action:** set `keyRotationPolicy.rotateOnRenew=true` on existing Windows profiles. Linux key reuse remains supported.
+- Agents refresh executable capabilities on heartbeat and stop ACME client processes after lease loss, expiry or timeout. **Operator action:** upgrade the API before these agents; older APIs reject the new heartbeat fields.
+- Revoked and decommissioned certificates remain visible when observed, but are excluded from active counts and renewal. Retirement does not revoke at the CA or remove installed copies. Manual renewal returns `409 CERTOPS_CERTIFICATE_NOT_RENEWABLE`.
+- Renewals now separates CA-capacity waits from job status and shows each profile's issuer. AD CS issuers are managed on the Renewals tab.
+- IIS renewal preserves binding settings or refuses the change with `UNSUPPORTED_BINDING_SETTINGS`. **Operator guidance:** remove the named unsupported setting or rebind manually.
 
 ### Fixed
 
-- Preserve mainline AD CS migrations 70–72 and preserve job-alert/lifecycle migration 73 and append distribution at 74–76. Recognized preview ledgers retain their applied names and append missing lifecycle safeguards at 76.
-- Keep publishing claim IDs out of public material-version responses, including administrator responses. Authorized rollout pause and retirement remain available when execution admission is blocked; resuming remains gated.
-- Certificate tokens stay current after agent renewals and passive discovery. Retired rediscovery cannot replace a live sibling's details, failed renewals use the job's original fingerprint after rotation, and replacement expiry windows restart while past alerts and delivery history remain available.
-  - **Operator action:** drain or pause old workers, apply migration 73, deploy matching API and worker images, then resume processing. Migration 73 captures new jobs' token associations; uncertain historical renewal alerts are retained as discarded. Unknown or retired identity work is cancelled before starting, while already-started work is marked for reconciliation. Payload replacement assertions cannot bypass retirement; first accept a replacement under its own active fingerprint.
-- Tokens linked to several certificate fingerprints can now open Retire from the asset inventory. Choose the certificate to revoke or decommission by its expiry and fingerprint; the other certificates keep their lifecycle status.
-- Control Center perpetual-asset and scoped-credential lists now show the rows already returned in `/control-center/stats` on first paint. The list hook could keep an empty seed after stats loaded, so the summary counts were right while the lists looked empty.
-- Opening a managed certificate from a job subject link now shows that certificate's Job history. The detail modal dropped the managed-certificate id on that deep-link path, so the history section never mounted.
-- **Windows agent on non-English hosts** ([#327](https://github.com/tokentimerch/tokentimer-core/issues/327), [#330](https://github.com/tokentimerch/tokentimer-core/issues/330)): the agent read the machine certificate store and http.sys bindings through the English labels of `certutil` and `netsh` output, so on hosts with another display language it found neither. Windows discovery came back empty, replaced certificates never became eligible for retention cleanup, and the startup cleanup after an interrupted renewal could delete the private key of the certificate it had just installed. A first IIS deploy failed with `QUERY_FAILED`, and an IIS renewal reset the binding's TLS settings (such as disabled legacy TLS or HTTP/2) to Windows defaults, with no previous certificate to roll back to. The store is now read through Windows PowerShell's certificate provider and the bindings from http.sys's own configuration, whatever the display language, and discovered validity dates are reported in UTC. **Operator action:** upgrade Windows agents running on non-English hosts, and check the TLS settings of IIS bindings renewed on those hosts (`netsh http show sslcert`), since earlier renewals reset them. Windows PowerShell 5.1 (`powershell.exe`) must be present on the host.
+- **Windows agent reliability:** graceful service shutdown drains pending output; startup failures exit cleanly; installation handles literal brackets in paths. Retention preserves keys still referenced by installed certificates, and ACME refuses certificate/key mismatches with `ACME_CERTIFICATE_KEY_MISMATCH`.
+- **Certificate backups:** concurrent deployments retain distinct rollback copies and prune only their own backups. **Operator guidance:** review historical timestamp-only backups manually; they are retained because their destination cannot be safely identified.
+- **Certificate lifecycle and alerts:** renewals and discovery keep token fingerprints and expiry windows current without reusing stale certificate details. **Operator action:** pause old workers, apply migration 73, deploy matching API/worker images, then resume. Historical alerts with uncertain associations remain discarded.
+- Malformed DNS lookup and Google certificate-inventory responses no longer cause destructive cleanup or removal of imported certificates.
+- Workspace invitations preserve existing admin and owner access. Certificate job links open their history, multi-certificate tokens support targeted retirement, and Control Center asset lists populate correctly.
+- Distribution permits authorized pause and retirement while execution is blocked; resume remains gated. Publishing claim IDs remain private.
+- **Non-English Windows hosts:** certificate discovery, IIS deployment and retention no longer depend on localized command output. **Operator action:** upgrade affected agents, ensure Windows PowerShell 5.1 is available, and review TLS settings on previously renewed IIS bindings with `netsh http show sslcert` ([#327](https://github.com/tokentimerch/tokentimer-core/issues/327), [#330](https://github.com/tokentimerch/tokentimer-core/issues/330)).
 
 ### Security
 
-- The `subfinder` binary in the API image is rebuilt with Go 1.26.9 and `golang.org/x/net` 0.60.0 (from Go 1.26.6 / x/net 0.57.0), clearing Critical/High HTTP/2 findings including [GO-2026-6612](https://pkg.go.dev/vuln/GO-2026-6612) / CVE-2026-78663. Companion pins move with the module graph (`golang.org/x/crypto` 0.57.0, `golang.org/x/sys` 0.48.0, `golang.org/x/text` 0.42.0). **Operator action:** rebuild the API image.
+- Certificate backups cannot escape allowed paths through symlinks or junctions. Windows installation rejects linked staging paths and invalid native helpers. **Operator guidance:** unpack releases into an ordinary directory.
+- Windows private-key deployment protects staging, backup and custody files with restricted ACLs. **Operator action:** redeploy existing filesystem certificate/key pairs to repair permissions and review older private-key backups.
+- Windows installation preserves Error Reporting policy; crash-dump containment remains unqualified. **Operator guidance:** review older `LocalDumps\node.exe` settings: `DumpType=0` selects a custom dump, not suppression.
+- DNS errors redact reflected credentials. **Operator guidance:** upgrade agents using Azure DNS, Google Cloud DNS, Route53, OVH or Exoscale and review retained provider-error logs.
+- The API image's `subfinder` dependencies address Critical/High HTTP/2 vulnerabilities, including [GO-2026-6612](https://pkg.go.dev/vuln/GO-2026-6612) / CVE-2026-78663. **Operator action:** rebuild the API image.
 
 ## [0.17.3] - 2026-10-08
 
@@ -682,7 +683,7 @@ CertOps agent and cert-manager controller: the first end-to-end path for TokenTi
 - **Worker runner** — `apps/worker/src/runner.js` long-running scheduler for local development and Docker Compose; reuses one-shot job functions with cron mode aligned to Kubernetes Helm defaults.
 - **Cross-platform dev scripts** — `scripts/dev.js`, `scripts/run-with-env.js`, and `scripts/process-utils.js` make `pnpm run dev` and `pnpm run migrate` work on Windows, WSL, Linux, and macOS.
 - **Zero-config local dev** — `pnpm dev` starts PostgreSQL via `deploy/compose/docker-compose.postgres.yml`, applies local defaults when no root `.env` exists, and runs DB migrations on API startup.
-- **Dev helpers** — `pnpm dev:noDB`, `pnpm dev:postgres`, and `pnpm dev:ports:check` (detects port conflicts with `tokentimer-enterprise` `demo:local` / `dev-mock-api`).
+- **Dev helpers** — `pnpm dev:noDB`, `pnpm dev:postgres`, and `pnpm dev:ports:check` (detects port conflicts with other local development APIs).
 - **Root `.env.example`** — documents minimum local development variables.
 - **Unit tests** — worker runner, CLI entrypoint detection (`is-node-entrypoint.js`), root env loading, and dev port checks.
 
@@ -1073,7 +1074,7 @@ CertOps agent and cert-manager controller: the first end-to-end path for TokenTi
 ## [0.1.0] - 2026-04-01
 
 First public release. Complete extraction of the self-hosted core from the
-tokentimer-cloud SaaS codebase into a standalone, variant-agnostic repository.
+hosted SaaS codebase into a standalone, variant-agnostic repository.
 
 ### Added
 
