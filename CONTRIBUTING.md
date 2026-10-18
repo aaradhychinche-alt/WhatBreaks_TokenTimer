@@ -44,29 +44,6 @@ A maintainer may use `workflow_dispatch` for a validation run only when the sele
 
 After a change is merged, the push CI run on `main` remains the authoritative post-merge validation and must be green before a release.
 
-### Reviewing GitHub Actions and Dependabot PRs
-
-Dependabot is configured solely for the `github-actions` package ecosystem to surface upstream Action updates while preserving the repository's supply-chain security posture. Updates for npm dependencies and Docker base images remain disabled.
-
-Maintainers reviewing Dependabot or manual Action update PRs must adhere to the following requirements before merging:
-
-1. **Mandatory full commit SHA pinning**:
-   - Every GitHub Action reference in `.github/workflows/*.yml` must remain pinned to an immutable, full 40-character commit SHA (e.g., `uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2`).
-   - PRs must never convert a commit SHA into a mutable tag (e.g., `@v4`) or branch name. The only approved exception is `github/codeql-action`, which tracks the major tag to receive CodeQL CLI engine updates from GitHub.
-   - Pinned actions must retain an inline comment indicating the associated semantic release version (e.g., `# v6.0.2`). Dependabot preserves the SHA format and updates the version tag comment when opening update PRs.
-
-2. **Supply-chain integrity and provenance verification**:
-   - Verify that the commit SHA in the PR matches the authentic release tag published upstream by the official action repository.
-   - Inspect the upstream commit diff and release changelog between the existing SHA and the proposed SHA for unexpected scripts, network calls, security regressions, or altered behavior.
-
-3. **Workflow permissions and least privilege**:
-   - Check whether the updated action requests or requires altered `permissions` blocks. Workflow token permissions must remain strictly minimal and bounded.
-
-4. **Validation before merge**:
-   - Auto-merge is strictly disabled for all dependency updates.
-   - Maintainers must run relevant local validation checks or trigger a manual `workflow_dispatch` run on a trusted branch before merging to confirm workflows execute without errors.
-
-
 ## Code Style
 
 - Follow existing patterns in the codebase

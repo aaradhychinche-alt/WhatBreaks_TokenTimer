@@ -8,7 +8,6 @@
 # - Dependabot preserves commit SHA pinning when opening update PRs.
 # - Auto-merging of dependency updates is strictly forbidden.
 # - Maintainers must review and validate upstream release notes and diffs before merging.
-#   See CONTRIBUTING.md for full maintainer review expectations.
 
 version: 2
 updates:
