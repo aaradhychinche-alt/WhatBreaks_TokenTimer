@@ -19,7 +19,27 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
           persist-credentials: false
+      - name: Detect whether unattended Azure cleanup credentials are configured
+        id: azure-credentials
+        shell: pwsh
+        env:
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          $missing = @()
+          foreach ($name in @('AZURE_CLIENT_ID','AZURE_TENANT_ID','AZURE_SUBSCRIPTION_ID')) {
+            $value = [Environment]::GetEnvironmentVariable($name)
+            if ($value -notmatch '^[0-9a-fA-F-]{36}$') { $missing += $name }
+          }
+          if ($missing.Count -gt 0) {
+            Write-Warning "Skipping cleanup: missing or invalid Azure OIDC variables: $($missing -join ', ')"
+            "configured=false" >> $env:GITHUB_OUTPUT
+            exit 0
+          }
+          "configured=true" >> $env:GITHUB_OUTPUT
       - name: Authenticate isolated lab subscription with OIDC
+        if: steps.azure-credentials.outputs.configured == 'true'
         shell: pwsh
         env:
           AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
@@ -27,5 +47,6 @@ jobs:
           AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
         run: ./infra/certops-adcs/login-oidc.ps1
       - name: Remove only expired owned qualification groups
+        if: steps.azure-credentials.outputs.configured == 'true'
         shell: pwsh
         run: ./infra/certops-adcs/remove-expired-labs.ps1
